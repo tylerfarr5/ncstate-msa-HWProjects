@@ -1,0 +1,205 @@
+---
+title: "Machine Learning HW 1"
+author: "Jonah Bonesteel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in data and libraries
+
+```{r}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ROCit)
+library(earth)
+library(mgcv)
+
+df <- read_csv("insurance_t.csv")
+#View(df)
+
+```
+
+Missing value imputation
+
+```{r}
+
+#data_types <- sapply(df, class)
+#print(data_types)
+
+# Ordinal variables
+      
+ordinal_df = data.frame(df$DDA,df$DIRDEP,df$NSF,df$SAV,df$ATM,df$CD,df$IRA,
+                        df$INV,df$MM,df$MMCRED,df$CC,df$CCPURC,df$SDB,df$INAREA, df$INS)
+
+Mode <- function(x) {
+  uniq_x <- unique(x)
+  uniq_x[which.max(tabulate(match(x, uniq_x)))]
+}
+
+ordinal_df <- ordinal_df %>% 
+  mutate_all(~ ifelse(is.na(.), Mode(.), .))
+ordinal_df <- data.frame(lapply(ordinal_df, factor))
+# Numeric variables
+
+cont_df = data.frame(df$ACCTAGE,df$DDABAL,df$DEP,df$DEPAMT,df$CHECKS,df$NSFAMT,df$PHONE,df$TELLER,df$SAVBAL,
+                        df$ATMAMT,df$POS,df$POSAMT,df$CDBAL,df$IRABAL,df$INVBAL,df$MMBAL,
+                        df$CCBAL,df$INCOME,df$LORES,df$HMVAL,df$AGE,df$CRSCORE)
+
+cont_df <- cont_df %>%
+  mutate_all(~ ifelse(is.na(.), median(., na.rm = TRUE), .))
+
+imp_df <- cbind(ordinal_df,cont_df)
+
+remove_prefix <- function(data, prefix) {
+  names(data) <- sub(paste0("^", prefix), "", names(data))
+  return(data)
+}
+
+# Remove the 'df.' part at the beginning of the column names:
+imp_df <- remove_prefix(imp_df, "df.")
+
+```
+
+Create a flagged dataframe
+
+```{r}
+binary_df <- data.frame(sapply(df, function(x) as.numeric(is.na(x))))
+binary_df <- data.frame(lapply(binary_df, as.factor))
+# Add "_flag" to the end of each column name in the binary dataframe
+colnames(binary_df) <- paste0(colnames(binary_df), "_flag")
+
+final_df <- cbind(imp_df, binary_df)
+# drop flagged columns where there are no imputed (flagged) values
+zero_columns <- colSums(final_df == 0) == nrow(final_df)
+final_df <- final_df[, !zero_columns]
+
+```
+
+MARS model 1 (no cross-validation):
+
+```{r}
+
+mars1 <- earth(INS ~ ., data = final_df, glm = list(family=binomial))
+summary(mars1)
+
+```
+
+Predict and test
+
+```{r}
+test_mars1_df <- final_df
+
+test_mars1_df$phat_mars1 <- predict(mars1, type = 'response')
+
+roc_mars1 <- rocit(as.vector(test_mars1_df$phat_mars1), test_mars1_df$INS)
+
+summary(roc_mars1)
+
+```
+
+AUC = 0.799
+
+GAM Model using important variables from MARS 1
+
+```{r}
+library(mgcv)
+
+gam1 <- mgcv::gam(INS ~ s(ACCTAGE)+
+                  s(DDABAL)+
+                  s(DEP)+
+                  s(CHECKS)+
+                  s(TELLER)+
+                  s(SAVBAL)+
+                  s(ATMAMT)+
+                  s(CDBAL)+
+                  s(IRABAL)+
+                  s(MMBAL)+
+                  s(CCBAL)+
+                  DDA+INV+CC+factor(PHONE_flag)+SAV, method = 'REML',family=binomial,data = final_df)
+
+summary(gam1)
+
+```
+
+Did other group members use select = TRUE
+
+Predicted probabilities
+
+```{r}
+test_gam1_df <- final_df
+
+test_gam1_df$phat_gam1 <- predict(gam1, type = 'response')
+
+roc_gam1 <- rocit(as.vector(test_gam1_df$phat_gam1), test_gam1_df$INS)
+
+summary(roc_gam1)
+
+```
+
+AUC = 0.7977
+
+MARS with cross validation
+
+```{r}
+mars2 <- earth(INS ~ ., data = final_df, glm = list(family=binomial), pmethod="cv", nfold=10,trace=3)
+summary(mars2)
+
+```
+
+Importance: SAVBAL, CDBAL, DDA1, DDABAL, MMBAL, PHONE_flag, ACCTAGE, CHECKS, TELLER, ATMAMT, INV1, CC1, CCBAL, ..
+(same as without CV)
+
+Predicted probabilities
+
+```{r}
+
+test_mars2_df <- final_df
+
+test_mars2_df$phat_mars2 <- predict(mars2, type = 'response')
+
+roc_mars2 <- rocit(as.vector(test_mars2_df$phat_mars2), test_mars2_df$INS)
+
+summary(roc_mars2)
+
+```
+
+AUC = 0.7995
+
+GAM with all variables
+
+```{r}
+#data_types <- sapply(final_df, class)
+#print(data_types)
+
+#zero_columns <- sapply(final_df, function(col) all(col == 0))
+
+# Print the column names
+#print(names(final_df)[zero_columns])
+
+library(mgcv)
+
+gam2 <- mgcv::gam(INS ~ DDA + DIRDEP + NSF + SAV + ATM + CD + IRA + INV + MM + MMCRED + CC + CCPURC + SDB + INAREA + s(ACCTAGE) + s(DDABAL) + s(DEP) + s(DEPAMT) + s(CHECKS) + s(NSFAMT) + s(PHONE) + s(TELLER) + s(SAVBAL) + s(ATMAMT) + s(POS) + s(POSAMT) + s(CDBAL) + s(IRABAL) + s(INVBAL) + s(MMBAL) + s(CCBAL) + s(INCOME) + s(LORES) + s(HMVAL) + s(AGE) + s(CRSCORE) + ACCTAGE_flag + PHONE_flag + POS_flag + POSAMT_flag + INV_flag + INVBAL_flag + CC_flag + CCBAL_flag + CCPURC_flag + INCOME_flag + LORES_flag + HMVAL_flag + AGE_flag + CRSCORE_flag, method = 'REML',family=binomial,data = final_df)
+
+summary(gam2)
+
+```
+
+Predicted probabilities
+
+```{r}
+test_gam2_df <- final_df
+
+test_gam2_df$phat_gam2 <- predict(gam2, type = 'response')
+
+roc_gam2 <- rocit(as.vector(test_gam2_df$phat_gam2), test_gam2_df$INS)
+
+summary(roc_gam2)
+
+```
+
+AUC = 0.8006
