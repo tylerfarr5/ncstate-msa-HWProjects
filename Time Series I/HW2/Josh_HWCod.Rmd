@@ -1,0 +1,275 @@
+---
+title: "Time Series HW2"
+output: html_notebook
+---
+
+## Load libraries needed
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(tseries)
+library(forecast)
+library(haven)
+library(fma)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(seasonalview)
+library(aTSA)
+library(imputeTS)
+library(reticulate)
+```
+
+## Read in the data file
+```{r}
+aep <- read.csv('https://raw.githubusercontent.com/sjsimmo2/TimeSeries/master/AEP_hourly.csv')
+```
+
+# Data Preperation and Cleaning 
+## Aggregate Hourly data to Monthly
+```{r}
+# Roll up hourly data to monthly data, with average used for aggregation
+df_aep <- aep %>%
+  # This part strips the day component from the date time and then aggregates on unique month and year
+  group_by(month = lubridate::floor_date(as.POSIXlt(aep$datetime_beginning_ept,format="%m/%d/%Y %H:%M",tz="est"), 'month')) %>%
+  summarise(AVG_MW = mean(mw))
+```
+
+## Convert to Time Series
+```{r}
+# Convert to time series, with a start year of 2016 and telling the function that this is monthly data
+Electricity <- ts(df_aep$AVG_MW, start = 	2016, frequency = 12)
+```
+
+## Split Data to Train-Validation-Test
+The Train data will be used to create various models and then the accuracy of those models will be assessed on the validation data. Only after the final model has been selected will the test data be used
+```{r}
+# Split the data for training set -  2016 - 2022 only
+train = subset(Electricity, end=(length(Electricity)-7))
+
+# Split the data for validation set -  Jan to April 2023 only
+val = subset(Electricity, start = length(Electricity) - 6, end = length(Electricity) - 3)
+
+# Split the data for test set -  May to July 2023 only
+test = subset(Electricity, start = length(Electricity) - 2)
+```
+
+# ESM Model Building (Built only on Training dataset)
+All models used will have the Initial option as either simple or optimal. Initial values are the default values for parameters (only level weight parameter for Simple ESM) prior to optimization, and the Initial option will change how the model will select the default parameter values for each component used in the model. 
+
+Damped can be applied to the trend component by setting the Damped option to TRUE. (if Damped is not specified, it will default to False) If Damped = TRUE, initial must be set to optimal
+
+h = 4 will be specified to tell the model to only make 4 predictions. This is to later compare to the validation data-set to determine prediction accuracy. The Forecast function will be able to change the number of prediction after the model is created without having to recreate the model.
+
+## Simple ESM
+Simple ESM only has level component
+```{r}
+# Create Single ESM (Simple)
+SES.train.s <- ses(train, initial = "simple", h = 4)
+summary(SES.train.s)
+# Create Single ESM (Optimal)
+SES.train.o <- ses(train, initial = "optimal", h = 4)
+summary(SES.train.o)
+```
+
+## Holt ESM
+Holt ESM has two components, level and trend. It is also possible to add another parameter for the trend through the damped option. 
+```{r}
+# Create Holt ESM (Optimal and not damped)
+LES.train.o <- holt(train, initial = "optimal", h = 4)
+
+# Create Holt ESM (Simple and not damped)
+LES.train.s <- holt(train, initial = "simple", h = 4)
+
+# Create Holt ESM (optimal With damped trend)
+LDES.train.o.d <- holt(train, initial = "optimal", damped = TRUE, h = 4)
+```
+
+## Holt-Winters ESM
+Holt Winters ESM has three components, level, trend, and seasonality. Seasonality can either be additive or multiplicative.
+```{r}
+# Create Holt-winters (Additive Seasonality with optimal)
+HWES.train.ad.o <- hw(train, seasonal = "additive", initial = "optimal", h = 4)
+
+# Create Holt-winters (Additive Seasonality with simple)
+HWES.train.ad.s <- hw(train, seasonal = "additive", initial = "simple", h = 4)
+
+# Create Holt-winters (Additive Seasonality with optimal and damped)
+HWES.train.ad.o.d <- hw(train, seasonal = "additive", initial = "optimal", damped = TRUE, h = 4)
+
+# Create Holt-winters (Multiplicative Seasonality with optimal)
+HWES.train.mul.o <- hw(train, seasonal = "multiplicative", initial = "optimal", h = 4)
+
+# Create Holt-winters (Multiplicative Seasonality with simple)
+HWES.train.mul.s <- hw(train, seasonal = "multiplicative", initial = "simple", h = 4)
+
+# Create Holt-winters (Multiplicative Seasonality with optimal and damped)
+HWES.train.mul.o.d <- hw(train, seasonal = "multiplicative", initial = "optimal", damped = TRUE, h = 4)
+```
+
+## EST Model estimation
+EST will try to determine what the “best” model will be. This will not always result in the best possible model.
+```{r}
+# Use ETS
+ets.train <- ets(train)
+
+# Create 4 forecasts using the ETS model
+ets.forecast.train <- ets.train %>% 
+  forecast::forecast(h=4)
+```
+
+## Testing Model Accuracy on Validation
+Creates Accuracy by comparing how well a model built on training data will predict the data in the validation data. MAPE is used as the accuracy measure
+```{r}
+# Creates empty dataframe
+df_MAPE <- data.frame(matrix(ncol = 2, nrow = 0))
+
+# Creates a list of all of the model forecast means
+models = list(SES.train.s$mean, SES.train.o$mean, LDES.train.o.d$mean, LES.train.s$mean, LES.train.o$mean, HWES.train.ad.o$mean, HWES.train.ad.s$mean, HWES.train.ad.o.d$mean, HWES.train.mul.o$mean, HWES.train.mul.s$mean, HWES.train.mul.o.d$mean, ets.forecast.train$mean)
+
+# Creates a list of the names of all models used
+model_names <- list("Single ESM (Simple)", "Single ESM (Optimal)", "Holt ESM (Optimal)", "Holt ESM (Simple)", "Holt ESM (optimal With damped trend)", "Holt-winters (Additive Seasonality with optimal)", "Holt-winters (Additive Seasonality with simple)", "Hold-winters (Additive Seasonality with optimal and damped)", "Hold-winters (Multiplicative Seasonality with optimal)", "Hold-winters (Multiplicative Seasonality with simple)", "Holt-winters (Multiplicative Seasonality with optimal and damped)", "ETS")
+
+# Loops through each model, calculating the MAPE and appending that value into a separate dataframe
+for (i in 1:12){
+  error=val-models[[i]]
+  MAPE=mean(abs(error)/abs(val))
+  df_MAPE <- rbind(df_MAPE,c(MAPE, model_names[[i]]))
+}
+
+# Specifies column names
+colnames(df_MAPE) <- c('Mape', 'Model_Name')
+
+# Sorts by ascending MAPE values
+df_MAPE <- df_MAPE[order(as.numeric(df_MAPE$Mape), decreasing = FALSE),]
+
+print(df_MAPE)
+```
+
+# Final Model Selected
+Now that the final model has been selected based on the highest MAPE calculated from the validation set, the training and validation sets will be combined together and ran on the final model selected. The model will have 3 prediction for comparison to the test data.
+```{r}
+# Create final data-set that combines the training and validation
+train_val = subset(Electricity, end=(length(Electricity)-3))
+
+# Create Hold-winters (Multiplicative Seasonality with optimal) 
+HWES.train_val <- hw(train_val, seasonal = "multiplicative", initial = "optimal", h = 3)
+#test.results=forecast::forecast(HWES.train_val,h=3)
+
+# Mape calculated by comparing model predictions and actual values
+error_test=test-HWES.train_val$mean
+MAPE_test=mean(abs(error_test)/abs(test))
+
+print(MAPE_test)
+```
+
+# Graphs
+## Graph of how well the model fits the actual data values
+```{r}
+autoplot(HWES.train_val) +
+  autolayer(fitted(HWES.train_val),series="Fitted")+ylab("Electricity Usage (In MegaWatts)")+ geom_vline(xintercept = 2023.333,color="orange",linetype="dashed")
+```
+
+```{r}
+ggsubseriesplot(Electricity)
+autoplot(Electricity)
+```
+
+## Decompose training data
+Classical decomposition is used as that the decomposition method can be specified as multiplicative or additive. Classical decomposition uses moving averages
+
+```{r}
+# Classical decomposition   
+decompose_train_m <- decompose(train, type ="multiplicative")
+decompose_train_a <- decompose(train, type ="additive")
+
+# STL Decomposition
+decomp_stl <- stl(train, s.window = 15)
+```
+
+## Graphing various decomposition methods
+Classical Decomposition (Multiplicative) graph
+This is a graph of multiplicative seasonality overlaid onto the data
+```{r}
+# Adjusts data for seasonality
+seas_adj_multi=train/decompose_train_m[["seasonal"]]
+
+autoplot(train) + geom_line(aes(y=seas_adj_multi),color="blue") +
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+Classical Decomposition (Additive) graph
+This is a graph of additive seasonality overlaid onto the data
+```{r}
+#Adjusts data for seasonality
+seas_adj_add=train - decompose_train_a[["seasonal"]]
+
+autoplot(train) + geom_line(aes(y=seas_adj_add),color="red") +
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+STL Decomposition (Additive) graph
+This is a graph of additive seasonality overlaid onto the data
+```{r}
+seas_adj_stl=train-decomp_stl$time.series[,1]
+
+autoplot(train)+geom_line(aes(y=decomp_stl$time.series[,2]),color="blue") +
+  geom_line(aes(y=seas_adj_stl),color="orange") +
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+## Compare all different decompositions
+```{r}
+autoplot(train) + geom_line(aes(y=seas_adj_add),color="red") +
+  geom_line(aes(y=seas_adj_multi),color="blue") + 
+  geom_line(aes(y=seas_adj_stl),color="orange")
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+Calculate Hyndman's F for strength of seasonality
+```{r}
+
+Fs_stl=max(0,1-var(decomp_stl$time.series[,3])/(var(decomp_stl$time.series[,3])+var(decomp_stl$time.series[,1])+2*cov(decomp_stl$time.series[,3],decomp_stl$time.series[,1])))
+
+```
+
+## Graph of actual electric load values overlaid with the trend/cycle component 
+Graph is for the training data set
+```{r}
+autoplot(train) + geom_line(aes(y=decompose_train[["trend"]]),color="blue") +
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+## Graph predicted values compared to actual values
+This graph is creates from comparing the training model predicted values to the actual values in the validation dataset
+```{r}
+#Time Plot of the predicted values and actual values for the validation data set.
+autoplot(val) + geom_line(aes(y=HWES.train.mul.o$mean),color="blue") + 
+  labs(title = "Average MegaWatt Usage between 2016 and 2022", x = "Time (In years)",y = "Electricity Usage (In MegaWatts)")
+```
+
+
+
+
+
+# Additional Code
+
+
+## Determine Best Models on Model Statistics
+Models with initial states as simple are all worse than when they are set to optimal
+```{r}
+df.model.aic <- data.frame(
+  model_name = c("Single ESM (Simple)", "Single ESM (Optimal)", "Holt ESM (Optimal)", "Holt ESM (Simple)", "Holt ESM (optimal With damped trend)", "Holt-winters (Additive Seasonality with optimal)", "Holt-winters (Additive Seasonality with simple)", "Hold-winters (Additive Seasonality with optimal and damped)", "Hold-winters (Multiplicative Seasonality with optimal)", "Hold-winters (Multiplicative Seasonality with simple)", "Holt-winters (Multiplicative Seasonality with optimal and damped)", "ETS"),
+  model_aic <- c(SES.train.s$model$aic, SES.train.o$model$aic, LDES.train.o.d$model$aic, LES.train.s$model$aic, LES.train.o$model$aic, HWES.train.ad.o$model$aic, HWES.train.ad.s$model$aic, HWES.train.ad.o.d$model$aic, HWES.train.mul.o$model$aic, HWES.train.mul.s$model$aic, HWES.train.mul.o.d$model$aic, ets.forecast.train$aic)
+)
+
+model_aic <- c(SES.train.s$model$aic, SES.train.o$model$aic, LDES.train.o.d$model$aic, LES.train.s$model$aic, LES.train.o$model$aic, HWES.train.ad.o$model$aic, HWES.train.ad.s$model$aic, HWES.train.ad.o.d$model$aic, HWES.train.mul.o$model$aic, HWES.train.mul.s$model$aic, HWES.train.mul.o.d$model$aic, ets.forecast.train$aic)
+a <- summary(SES.train.s)
+print(c("Single ESM (Simple)", SES.train.s$model$aic))
+print( c("Single ESM (Simple)", "Single ESM (Optimal)", "Holt ESM (Optimal)", "Holt ESM (Simple)", "Holt ESM (optimal With damped trend)", "Holt-winters (Additive Seasonality with optimal)", "Holt-winters (Additive Seasonality with simple)", "Hold-winters (Additive Seasonality with optimal and damped)", "Hold-winters (Multiplicative Seasonality with optimal)", "Hold-winters (Multiplicative Seasonality with simple)", "Holt-winters (Multiplicative Seasonality with optimal and damped)", "ETS"))
+print(c(SES.train.s$model$aic, SES.train.o$model$aic, LDES.train.o.d$model$aic, LES.train.s$model$aic, LES.train.o$model$aic, HWES.train.ad.o$model$aic, HWES.train.ad.s$model$aic, HWES.train.ad.o.d$model$aic, HWES.train.mul.o$model$aic, HWES.train.mul.s$model$aic, HWES.train.mul.o.d$model$aic, ets.forecast.train$aic)
+)
+```
